@@ -9,7 +9,7 @@ set -e
 # NOTE: Compares a single chip-seq dataset against a single control.
 # =====================================================================
 library=$1
-echo "Processing ${library}..."
+echo -e "Processing ${library}...\n\n"
 
 # Arguments / Software:
 GENOMESIZE="2715853792"
@@ -46,34 +46,6 @@ then
     exit 1
 fi
 
-# scale sequencing depth
-chip_depth=`zcat ${chiptag} | wc -l`
-input_depth=`zcat ${input_depth} | wc -l`
-if [[ ${chip_depth} -gt ${input_depth} ]]
-then
-    scaling=" --to-large "
-else
-    scaling=""
-fi
-
-# Get fraglen corresponding to ChIP file
-#FRAGLENFILE="Metrics/${library}.spp_stats.txt"
-#if [[ -s ${FRAGLENFILE} ]]
-#then
-#    fraglen=$( awk '{printf("%0.0d",$3 / 2)}' ${FRAGLENFILE} )
-#    if [[ -z $fraglen || $fraglen -lt 30 ]]
-#    then
-#        fraglen=200
-#    elif [[ $fraglen =~ "," ]]
-#        fraglen=$(echo -e "${fraglen}" | sed -e 's/,/\n/g' | awk 'BEGIN {total=0} {total += $1} END {print total/NR}')
-#    else
-#        fraglen=$fraglen
-#    fi
-#    echo "Fragment length = $fraglen * 2"
-#else
-#    echo "WARNING: No fragment length found corresponding to file ${library}"
-#fi
-
 # ==================================
 # Script for signal track generation
 # (Previously submitted separately).
@@ -85,17 +57,28 @@ mkdir -p ${tmpdir}
 # Determine if reads are paired
 # or single
 # --------------------------
-nreads=`ls -1 Raw_Reads/${library}*.fq.gz | wc -l`
-if [[ ${nreads} -eq 1 ]]
-then
-    file_format="-f BAM"
-elif [[ ${nreads} -eq 2 ]]
+#nreads=`ls -1 Raw_Reads/${library}*.fq.gz | wc -l`
+#if [[ ${nreads} -eq 1 ]]
+#then
+#    file_format="-f BAM"
+#elif [[ ${nreads} -eq 2 ]]
+#then
+#    file_format="-f BAMPE"
+#else
+#    echo "${library} is either single or peaired reads, please manually check..."
+#fi
+
+nreads=$(cat Seq_file_type.txt | awk -v i=${library} '{if ($1 == i) print $2}')
+if [[ ${nreads} == "Paired" ]]
 then
     file_format="-f BAMPE"
+elif [[ ${nreads} == "Single" ]]
+then
+    file_format="-f BAM"
 else
     echo "${library} is either single or peaired reads, please manually check..."
 fi
-
+echo -e "ChIP library is: ${nreads}...\n\n"
 
 # --------------------------
 # Get read depth ratio and
@@ -103,10 +86,32 @@ fi
 # --------------------------
 chiptag="Aligned_Reads/${library}.tagAlign.gz"
 inputtag="Aligned_Reads/${control}.tagAlign.gz"
-chipReads=$(zcat ${chiptag} | wc -l | awk '{printf "%f", $1/1000000}') 
-controlReads=$(zcat ${inputtag} | wc -l | awk '{printf "%f", $1/1000000}' )
-sval=$(echo "${chipReads} ${controlReads}" | awk '$1>$2{printf "%f",$2} $1<=$2{printf "%f",$1}' )
+chip_depth=$(zcat ${chiptag} | wc -l)
+echo -e "Number of ChIP reads: ${chip_depth}\n"
+if [[ ! ${library} =~ ATAC* ]]
+then
+    input_depth=$(zcat ${inputtag} | wc -l)
+else
+   input_depth=0
+   echo -e "Number of Input reads: ${chip_depth}\n"
+fi
 
+if [[ ${chip_depth} -gt ${input_depth} || ! ${library} =~ ATAC* ]]
+then
+    scaling=" --to-large "
+else
+    scaling=""
+fi
+chipReads=$(zcat ${chiptag} | wc -l | awk '{printf "%f", $1/1000000}') 
+if [[ ! ${library} =~ ATAC* ]]
+then
+    controlReads=$(zcat ${inputtag} | wc -l | awk '{printf "%f", $1/1000000}' )
+    #echo -e "Number of ChIP reads: ${chipReads} (x 10^6)\nNumber of Input reads: ${controlReads} (x 10^6)\n\n\n"
+    sval=$(echo "${chipReads} ${controlReads}" | awk '$1>$2{printf "%f",$2} $1<=$2{printf "%f",$1}' )
+else
+	sval=1.0
+fi
+echo -e "Scaling factor for treatment and control track: $sval ... \n\n\n"
 
 # ===================================================================
 # Create the pileup and control lambda bedgraph tracks using MACS2.1:
@@ -118,29 +123,32 @@ then
         libtype="--broad"
         peak_file="${PKPREF}_peaks.broadPeak"
         combchip="-t Aligned_Reads/${library}.bam"
-        combcontrol="-c Aligned_Reads/${control}.bam"
+        combcontrol="-c Aligned_Reads/${control}.bam --fix-bimodal"
+        pvalue="-q 0.05"
     elif [[ ${library} == H3K4me3* || ${library} == H3K27ac* || ${library} == H3K4me1* || ${library} == CTCF*  ]]
     then
         libtype=""
         peak_file="${PKPREF}_peaks.narrowPeak"
         combchip="-t Aligned_Reads/${library}.bam"
-        combcontrol="-c Aligned_Reads/${control}.bam"
+        combcontrol="-c Aligned_Reads/${control}.bam --fix-bimodal "
+        pvalue="-q 0.01"
     elif [[ ${library} == ATAC* ]]
     then
         libtype=""
         peak_file="${PKPREF}_peaks.narrowPeak"
-        combchip="-t Aligned_Reads/${library}.bam --shift 100"
+        combchip="-t Aligned_Reads/${library}.bam --shift -100 --nomodel"
         combcontrol=""
+        pvalue=""
     else
-        echo "${library} is not chipseq, please manually check..."
+        echo -e "${library} is not chipseq, please manually check..."
     fi
-    macs2 callpeak ${combchip} ${combcontrol} ${file_format} -n ${PKPREF} -g ${GENOMESIZE} -q 0.05 --nomodel --extsize 200 -B --SPMR ${libtype} ${scaling}
+    macs2 callpeak ${combchip} ${combcontrol} ${file_format} -n ${PKPREF} -g ${GENOMESIZE} ${pvalue} --extsize 200 -B --keep-dup all --SPMR ${libtype} ${scaling}
     gzip -f -c ${peak_file} > ${peak_file}.gz
     rm -f ${peak_file}
     rm -f ${PKPREF}_peaks.xls
     rm -f ${PKPREF}_summits.bed
 else
-    echo "${library} lambda bedgraph files are already there!!!"
+    echo -e "${library} lambda bedgraph files are already there!!!\n"
 fi
 
 # ===================
@@ -153,10 +161,10 @@ nPeaks=`zcat ${peak_file}.gz | wc -l`
 #then
   if [[ ! -e "${FCPREF}.bedgraph.gz" ]]
   then
-    echo "Generating FoldChange bedgraph"
+    echo -e "Generating FoldChange bedgraph...\n"
     macs2 bdgcmp -t ${PKPREF}_treat_pileup.bdg -c ${PKPREF}_control_lambda.bdg -o ${PKPREF}_FE.bdg -m FE
     slopBed -i ${PKPREF}_FE.bdg -g ${GENOME} -b 0 | bedClip stdin ${GENOME} ${FCPREF}.bedgraph
-    echo "Sort and create FC bigWig file"
+    echo -e "Sort and create FC bigWig file"
     sort -k1,1 -k2,2n ${FCPREF}.bedgraph > ${FCPREF}.bedgraph.tmp
     # bedGraphToBigWig ${FCPREF}.bedgraph.tmp ${GENOME} ${LVPREF}.bigwig
     gzip -c ${FCPREF}.bedgraph.tmp > ${FCPREF}.bedgraph.gz
@@ -169,11 +177,11 @@ nPeaks=`zcat ${peak_file}.gz | wc -l`
   LVPREF=${PKPREF}.pval.signal
   if [[ ! -e "${LVPREF}.bedgraph.gz" ]]
   then
-    echo "Generating log10pval bedgraph"
+    echo -e "Generating log10pval bedgraph...\n"
     macs2 bdgcmp -t ${PKPREF}_treat_pileup.bdg -c ${PKPREF}_control_lambda.bdg -o ${PKPREF}_ppois.bdg -m ppois -S ${sval}
     slopBed -i ${PKPREF}_ppois.bdg -g ${GENOME} -b 0 | bedClip stdin ${GENOME} ${LVPREF}.bedgraph
 
-    echo "Sort and create log10pval bigWig file"
+    echo -e "Sort and create log10pval bigWig file...\n"
     sort -k1,1 -k2,2n ${LVPREF}.bedgraph > ${LVPREF}.bedgraph.tmp
     # bedGraphToBigWig ${LVPREF}.bedgraph.tmp ${GENOME} ${LVPREF}.bigwig
     gzip -c -f ${LVPREF}.bedgraph.tmp > ${LVPREF}.bedgraph.gz
